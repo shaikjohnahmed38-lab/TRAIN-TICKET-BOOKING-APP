@@ -1,0 +1,8 @@
+{
+  "name": "asta",
+  "description": "Interactive 2D Train Layout \u0026 Indian Railway Demo Booking MVP for Andhra Pradesh and Telangana corridors.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

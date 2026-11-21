@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Plus Jakarta Sans', 'Noto Sans Telugu', system-ui, sans-serif;
+    --font-body: 'DM Sans', 'Noto Sans Telugu', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    --brand-primary: #1d4ed8;
+    --brand-primary-hover: #1e40af;
+    --surface-canvas: #f8fafc;
+    --surface-card: #ffffff;
+  }
+
+  body {
+    font-family: var(--font-body);
+    background-color: var(--surface-canvas);
+    color: #0f172a;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono-tabular {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Custom scrollbar for clean coach consist horizontal track */
+.rail-scroll::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+
+.rail-scroll::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 9999px;
+}
+
+.rail-scroll::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+.rail-scroll::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
