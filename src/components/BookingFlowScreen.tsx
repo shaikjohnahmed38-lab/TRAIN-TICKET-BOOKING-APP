@@ -6,6 +6,7 @@ import {
   CreditCard,
   ShieldCheck,
   Smartphone,
+  UserPlus,
   Wallet,
 } from 'lucide-react';
 import { calculateDemoFare, formatHoldCountdown } from '../utils/fareCalculator';
@@ -13,10 +14,12 @@ import type {
   CoachSummary,
   CoachType,
   CustomerUser,
+  IntegrationStatusMap,
   Language,
   PassengerInput,
   PaymentMethod,
   PricingRule,
+  SavedPassenger,
   SeatRecord,
   TrainSearchResult,
 } from '../types/railway';
@@ -27,9 +30,16 @@ interface BookingFlowScreenProps {
   coach: CoachSummary;
   selectedSeats: SeatRecord[];
   holdExpiresAt: number;
+  holdDurationMinutes: number;
   pricingRules: Record<CoachType, PricingRule>;
   user: CustomerUser | null;
-  onQuickRequestOtp: (mobile: string) => Promise<string>;
+  savedPassengers: SavedPassenger[];
+  integrations: IntegrationStatusMap | null;
+  onQuickLoginPassword: (identifier: string, password: string) => Promise<void>;
+  onQuickRequestOtp: (mobile: string) => Promise<{
+    hint?: string;
+    deliveryMode: 'TWILIO' | 'SANDBOX';
+  }>;
   onQuickVerifyOtp: (mobile: string, otp: string) => Promise<void>;
   onCancelHold: () => Promise<void>;
   onHoldExpired: () => void;
@@ -39,6 +49,10 @@ interface BookingFlowScreenProps {
     outcome: 'SUCCESS' | 'PENDING' | 'FAILED';
     existingPnr?: string;
   }) => Promise<{ pnr: string; status: string }>;
+  onRazorpayCheckout?: (params: {
+    passengers: PassengerInput[];
+    existingPnr?: string;
+  }) => Promise<void>;
   language: Language;
   t: TranslationDictionary;
 }
@@ -48,22 +62,31 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
   coach,
   selectedSeats,
   holdExpiresAt,
+  holdDurationMinutes,
   pricingRules,
   user,
+  savedPassengers,
+  integrations,
+  onQuickLoginPassword,
   onQuickRequestOtp,
   onQuickVerifyOtp,
   onCancelHold,
   onHoldExpired,
   onCompletePayment,
+  onRazorpayCheckout,
   language,
   t,
 }) => {
   const [nowMs, setNowMs] = useState(Date.now());
   const [subStep, setSubStep] = useState<'passengers' | 'payment'>('passengers');
 
-  // Inline Demo OTP Auth state when user is not yet logged in
+  // Inline Auth state when user is not yet logged in
+  const [quickAuthTab, setQuickAuthTab] = useState<'password' | 'otp'>('password');
+  const [loginId, setLoginId] = useState('');
+  const [loginPw, setLoginPw] = useState('');
   const [mobile, setMobile] = useState('');
   const [otpInput, setOtpInput] = useState('');
+  const [otpRequested, setOtpRequested] = useState(false);
   const [demoOtpHint, setDemoOtpHint] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
@@ -81,8 +104,11 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
   const [validationError, setValidationError] = useState<string | null>(null);
 
   // Payment state
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('UPI');
-  const [upiId, setUpiId] = useState('demo.traveller@upi');
+  const razorpayConfigured = Boolean(integrations?.razorpayPayments.configured);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(
+    razorpayConfigured ? 'RAZORPAY' : 'UPI'
+  );
+  const [upiId, setUpiId] = useState('traveller@upi');
   const [cardLast4, setCardLast4] = useState('4242');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [paymentFeedback, setPaymentFeedback] = useState<{
@@ -96,6 +122,23 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
     }, 1000);
     return () => clearInterval(id);
   }, []);
+
+  // Autofill passenger 1 when user signs in mid-checkout and name is empty
+  useEffect(() => {
+    if (!user) return;
+    setPassengers((prev) =>
+      prev.map((p, idx) =>
+        idx === 0 && !p.fullName.trim()
+          ? {
+              ...p,
+              fullName: user.name || '',
+              age: user.age ? String(user.age) : p.age,
+              gender: user.gender ?? p.gender,
+            }
+          : p
+      )
+    );
+  }, [user]);
 
   const countdown = formatHoldCountdown(holdExpiresAt, nowMs);
 
@@ -116,6 +159,21 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
     );
   };
 
+  const applySavedPassenger = (index: number, saved: SavedPassenger) => {
+    setPassengers((prev) =>
+      prev.map((p, i) =>
+        i === index
+          ? {
+              ...p,
+              fullName: saved.fullName,
+              age: String(saved.age),
+              gender: saved.gender,
+            }
+          : p
+      )
+    );
+  };
+
   const handleContinueToPayment = (e: React.FormEvent) => {
     e.preventDefault();
     for (const p of passengers) {
@@ -129,10 +187,19 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
     setSubStep('payment');
   };
 
-  const handleSimulatedPayment = async (outcome: 'SUCCESS' | 'PENDING' | 'FAILED') => {
+  const handlePaymentAction = async (outcome: 'SUCCESS' | 'PENDING' | 'FAILED') => {
+    if (isSubmitting) return;
     setIsSubmitting(true);
     setValidationError(null);
     try {
+      if (paymentMethod === 'RAZORPAY' && outcome === 'SUCCESS' && onRazorpayCheckout) {
+        await onRazorpayCheckout({
+          passengers,
+          existingPnr: paymentFeedback?.pnr,
+        });
+        return;
+      }
+
       const res = await onCompletePayment({
         passengers,
         paymentMethod,
@@ -172,7 +239,7 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
 
   return (
     <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 md:py-8 pb-24 md:pb-12 space-y-6">
-      {/* Live 15-Minute Seat Hold Timer Header */}
+      {/* Live Seat Hold Timer Header */}
       <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <button
@@ -199,7 +266,9 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
           className="flex items-center gap-2 bg-white border border-blue-200 px-3.5 py-2 rounded-xl"
         >
           <Clock className="w-4 h-4 text-blue-700" />
-          <span className="text-xs font-medium text-slate-600">{t.booking.holdBannerTitle}</span>
+          <span className="text-xs font-medium text-slate-600">
+            {t.booking.holdBannerTitle} ({holdDurationMinutes}m)
+          </span>
           <span className="font-mono-tabular text-base font-bold text-blue-700">
             {countdown.formatted}
           </span>
@@ -227,17 +296,17 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
               : 'border-transparent text-slate-500'
           }`}
         >
-          {language === 'te' ? '2. డెమో చెల్లింపు' : '2. Demo Payment'}
+          {t.booking.stepPayment}
         </span>
       </div>
 
       <div className="grid lg:grid-cols-12 gap-6 items-start">
         {/* Main Column */}
         <div className="lg:col-span-8 space-y-6">
-          {/* Optional/Recommended Demo Mobile Verification */}
+          {/* Optional Account Link */}
           {!user && subStep === 'passengers' && (
             <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
-              <div className="flex items-start justify-between gap-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                     <Smartphone className="w-4 h-4 text-blue-700" />
@@ -245,66 +314,89 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
                   </h2>
                   <p className="text-xs text-slate-600 mt-0.5">{t.booking.loginRequiredDesc}</p>
                 </div>
-                <span className="text-xs font-semibold text-amber-800 whitespace-nowrap shrink-0">
-                  Demo OTP · No SMS
-                </span>
-              </div>
-
-              <div className="flex flex-wrap items-end gap-2.5">
-                <div className="flex-1 min-w-[180px]">
-                  <label htmlFor="quick-mobile" className="block text-xs font-medium text-slate-600 mb-1">
-                    {t.profile.mobileLabel}
-                  </label>
-                  <input
-                    id="quick-mobile"
-                    type="tel"
-                    maxLength={10}
-                    value={mobile}
-                    onChange={(e) => setMobile(e.target.value)}
-                    placeholder="9876543210"
-                    className="w-full h-10 px-3 text-sm border border-slate-300 rounded-lg font-mono-tabular"
-                  />
+                <div className="inline-flex p-0.5 bg-slate-100 rounded-lg border border-slate-200 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setQuickAuthTab('password')}
+                    className={`px-2.5 py-1 rounded font-semibold ${
+                      quickAuthTab === 'password' ? 'bg-white text-blue-700' : 'text-slate-600'
+                    }`}
+                  >
+                    Password
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuickAuthTab('otp')}
+                    className={`px-2.5 py-1 rounded font-semibold ${
+                      quickAuthTab === 'otp' ? 'bg-white text-blue-700' : 'text-slate-600'
+                    }`}
+                  >
+                    Mobile OTP
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  disabled={authLoading}
-                  onClick={async () => {
-                    setAuthError(null);
-                    setAuthLoading(true);
-                    try {
-                      const hint = await onQuickRequestOtp(mobile);
-                      setDemoOtpHint(hint);
-                    } catch (err) {
-                      setAuthError((err as Error).message);
-                    } finally {
-                      setAuthLoading(false);
-                    }
-                  }}
-                  className="h-10 px-4 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg whitespace-nowrap"
-                >
-                  {t.profile.sendOtpBtn}
-                </button>
               </div>
 
-              {demoOtpHint && (
-                <div className="space-y-2 pt-1">
-                  <div className="p-2.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900">
-                    {t.profile.otpHintLabel}:{' '}
-                    <strong className="font-mono-tabular text-sm">{demoOtpHint}</strong> ·{' '}
-                    {t.profile.demoAuthDisclaimer}
+              {quickAuthTab === 'password' ? (
+                <div className="grid sm:grid-cols-12 gap-2.5 items-end">
+                  <div className="sm:col-span-5">
+                    <label htmlFor="quick-id" className="block text-xs font-medium text-slate-600 mb-1">
+                      Email or Mobile
+                    </label>
+                    <input
+                      id="quick-id"
+                      type="text"
+                      value={loginId}
+                      onChange={(e) => setLoginId(e.target.value)}
+                      placeholder="you@example.com or 9876543210"
+                      className="w-full h-10 px-3 text-sm border border-slate-300 rounded-lg"
+                    />
                   </div>
+                  <div className="sm:col-span-4">
+                    <label htmlFor="quick-pw" className="block text-xs font-medium text-slate-600 mb-1">
+                      Password
+                    </label>
+                    <input
+                      id="quick-pw"
+                      type="password"
+                      value={loginPw}
+                      onChange={(e) => setLoginPw(e.target.value)}
+                      placeholder="Password"
+                      className="w-full h-10 px-3 text-sm border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    disabled={authLoading}
+                    onClick={async () => {
+                      setAuthError(null);
+                      setAuthLoading(true);
+                      try {
+                        await onQuickLoginPassword(loginId, loginPw);
+                      } catch (err) {
+                        setAuthError((err as Error).message);
+                      } finally {
+                        setAuthLoading(false);
+                      }
+                    }}
+                    className="sm:col-span-3 h-10 px-4 text-xs font-semibold bg-blue-700 hover:bg-blue-800 text-white rounded-lg"
+                  >
+                    {authLoading ? '...' : 'Sign In'}
+                  </button>
+                </div>
+              ) : (
+                <>
                   <div className="flex flex-wrap items-end gap-2.5">
-                    <div className="flex-1 min-w-[160px]">
-                      <label htmlFor="quick-otp" className="block text-xs font-medium text-slate-600 mb-1">
-                        {t.profile.otpLabel}
+                    <div className="flex-1 min-w-[180px]">
+                      <label htmlFor="quick-mobile" className="block text-xs font-medium text-slate-600 mb-1">
+                        {t.profile.mobileLabel}
                       </label>
                       <input
-                        id="quick-otp"
-                        type="text"
-                        maxLength={6}
-                        value={otpInput}
-                        onChange={(e) => setOtpInput(e.target.value)}
-                        placeholder="6-digit OTP"
+                        id="quick-mobile"
+                        type="tel"
+                        maxLength={10}
+                        value={mobile}
+                        onChange={(e) => setMobile(e.target.value)}
+                        placeholder="9876543210"
                         className="w-full h-10 px-3 text-sm border border-slate-300 rounded-lg font-mono-tabular"
                       />
                     </div>
@@ -315,24 +407,69 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
                         setAuthError(null);
                         setAuthLoading(true);
                         try {
-                          await onQuickVerifyOtp(mobile, otpInput);
+                          const res = await onQuickRequestOtp(mobile);
+                          setDemoOtpHint(res.hint ?? null);
+                          setOtpRequested(true);
                         } catch (err) {
                           setAuthError((err as Error).message);
                         } finally {
                           setAuthLoading(false);
                         }
                       }}
-                      className="h-10 px-4 text-xs font-semibold bg-blue-700 hover:bg-blue-800 text-white rounded-lg whitespace-nowrap"
+                      className="h-10 px-4 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg whitespace-nowrap"
                     >
-                      {t.profile.verifyLoginBtn}
+                      {t.profile.sendOtpBtn}
                     </button>
                   </div>
-                </div>
+
+                  {otpRequested && (
+                    <div className="space-y-2 pt-1">
+                      {demoOtpHint && (
+                        <div className="p-2.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900">
+                          {t.profile.otpHintLabel}:{' '}
+                          <strong className="font-mono-tabular text-sm">{demoOtpHint}</strong>
+                        </div>
+                      )}
+                      <div className="flex flex-wrap items-end gap-2.5">
+                        <div className="flex-1 min-w-[160px]">
+                          <label htmlFor="quick-otp" className="block text-xs font-medium text-slate-600 mb-1">
+                            {t.profile.otpLabel}
+                          </label>
+                          <input
+                            id="quick-otp"
+                            type="text"
+                            maxLength={6}
+                            value={otpInput}
+                            onChange={(e) => setOtpInput(e.target.value)}
+                            placeholder="6-digit OTP"
+                            className="w-full h-10 px-3 text-sm border border-slate-300 rounded-lg font-mono-tabular"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          disabled={authLoading}
+                          onClick={async () => {
+                            setAuthError(null);
+                            setAuthLoading(true);
+                            try {
+                              await onQuickVerifyOtp(mobile, otpInput);
+                            } catch (err) {
+                              setAuthError((err as Error).message);
+                            } finally {
+                              setAuthLoading(false);
+                            }
+                          }}
+                          className="h-10 px-4 text-xs font-semibold bg-blue-700 hover:bg-blue-800 text-white rounded-lg whitespace-nowrap"
+                        >
+                          {t.profile.verifyLoginBtn}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
 
-              {authError && (
-                <p className="text-xs text-red-700 font-medium">{authError}</p>
-              )}
+              {authError && <p className="text-xs text-red-700 font-medium">{authError}</p>}
             </section>
           )}
 
@@ -349,7 +486,7 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
                     key={passenger.seatNumber}
                     className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 space-y-3"
                   >
-                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-slate-700">
                       <span>
                         {t.common.passenger} {idx + 1}
                       </span>
@@ -358,6 +495,24 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
                         {passenger.berthType})
                       </span>
                     </div>
+
+                    {savedPassengers.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[11px] text-slate-500 inline-flex items-center gap-1">
+                          <UserPlus className="w-3 h-3" /> Quick-fill:
+                        </span>
+                        {savedPassengers.map((sp) => (
+                          <button
+                            key={sp.id}
+                            type="button"
+                            onClick={() => applySavedPassenger(idx, sp)}
+                            className="px-2 py-0.5 text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
+                          >
+                            {sp.fullName} ({sp.age})
+                          </button>
+                        ))}
+                      </div>
+                    )}
 
                     <div className="grid sm:grid-cols-12 gap-3">
                       <div className="sm:col-span-6">
@@ -454,7 +609,7 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
               </div>
             </form>
           ) : (
-            /* DEMO PAYMENT GATEWAY */
+            /* PAYMENT GATEWAY */
             <section className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-5">
               <div>
                 <h1 className="text-lg font-bold text-slate-900">{t.booking.paymentTitle}</h1>
@@ -475,12 +630,35 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
               )}
 
               <div className="grid sm:grid-cols-2 gap-3">
+                {razorpayConfigured && (
+                  <button
+                    type="button"
+                    onClick={() => setPaymentMethod('RAZORPAY')}
+                    className={`sm:col-span-2 p-3.5 rounded-xl border-2 text-left flex items-center justify-between gap-3 transition-colors ${
+                      paymentMethod === 'RAZORPAY'
+                        ? 'border-blue-700 bg-blue-50/60 text-blue-900'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <ShieldCheck className="w-5 h-5 text-emerald-700 shrink-0" />
+                      <div>
+                        <div className="text-sm font-bold">Razorpay Live / Test Gateway</div>
+                        <div className="text-xs text-slate-500">
+                          UPI, Cards, Netbanking verified via server HMAC signature
+                        </div>
+                      </div>
+                    </div>
+                    <span className="text-xs font-bold text-emerald-700">Configured</span>
+                  </button>
+                )}
+
                 {(
                   [
-                    { id: 'UPI', label: 'UPI ID (Simulated)', icon: Wallet },
-                    { id: 'PHONEPE', label: 'PhonePe Style (Demo)', icon: Smartphone },
-                    { id: 'GPAY', label: 'Google Pay Style (Demo)', icon: Smartphone },
-                    { id: 'CARD', label: 'Debit / Credit Card (Demo)', icon: CreditCard },
+                    { id: 'UPI', label: 'UPI ID (Sandbox)', icon: Wallet },
+                    { id: 'PHONEPE', label: 'PhonePe (Sandbox)', icon: Smartphone },
+                    { id: 'GPAY', label: 'Google Pay (Sandbox)', icon: Smartphone },
+                    { id: 'CARD', label: 'Debit / Credit Card (Sandbox)', icon: CreditCard },
                   ] as const
                 ).map((method) => {
                   const Icon = method.icon;
@@ -503,10 +681,10 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
                 })}
               </div>
 
-              {paymentMethod !== 'CARD' ? (
+              {paymentMethod !== 'CARD' && paymentMethod !== 'RAZORPAY' && (
                 <div>
                   <label htmlFor="demo-upi" className="block text-xs font-medium text-slate-600 mb-1">
-                    Simulated UPI Handle (No real debit)
+                    Sandbox UPI Handle
                   </label>
                   <input
                     id="demo-upi"
@@ -516,10 +694,12 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
                     className="w-full h-10 px-3 text-sm border border-slate-300 rounded-lg font-mono-tabular"
                   />
                 </div>
-              ) : (
+              )}
+
+              {paymentMethod === 'CARD' && (
                 <div>
                   <label htmlFor="demo-card" className="block text-xs font-medium text-slate-600 mb-1">
-                    Test Card Reference Digits (Do not enter real card numbers)
+                    Test Card Reference Digits (Sandbox only)
                   </label>
                   <input
                     id="demo-card"
@@ -541,38 +721,53 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
               <div className="border-t border-slate-200 pt-4 space-y-3">
                 <div className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
                   <ShieldCheck className="w-4 h-4 text-blue-700" />
-                  <span>{t.booking.simulateOutcomeTitle}</span>
+                  <span>
+                    {paymentMethod === 'RAZORPAY'
+                      ? 'Proceed to Razorpay Verified Payment Modal'
+                      : t.booking.simulateOutcomeTitle}
+                  </span>
                 </div>
 
-                <div className="flex flex-col sm:flex-row gap-2.5">
+                {paymentMethod === 'RAZORPAY' ? (
                   <button
                     type="button"
                     disabled={isSubmitting}
-                    onClick={() => handleSimulatedPayment('SUCCESS')}
-                    data-testid="pay-success-btn"
-                    className="flex-1 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white text-sm font-bold transition-colors"
+                    onClick={() => handlePaymentAction('SUCCESS')}
+                    className="w-full py-3 px-4 rounded-xl bg-blue-700 hover:bg-blue-800 disabled:bg-blue-400 text-white text-sm font-bold transition-colors"
                   >
-                    {isSubmitting ? t.common.loading : t.booking.paySuccessBtn}
+                    {isSubmitting ? t.common.loading : `Pay ₹${fare.totalFare} via Razorpay`}
                   </button>
-                  <button
-                    type="button"
-                    disabled={isSubmitting}
-                    onClick={() => handleSimulatedPayment('PENDING')}
-                    data-testid="pay-pending-btn"
-                    className="py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:bg-amber-300 text-white text-sm font-bold transition-colors"
-                  >
-                    {t.booking.payPendingBtn}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isSubmitting}
-                    onClick={() => handleSimulatedPayment('FAILED')}
-                    data-testid="pay-fail-btn"
-                    className="py-3 px-4 rounded-xl bg-red-600 hover:bg-red-700 disabled:bg-red-300 text-white text-sm font-bold transition-colors"
-                  >
-                    {t.booking.payFailBtn}
-                  </button>
-                </div>
+                ) : (
+                  <div className="flex flex-col sm:flex-row gap-2.5">
+                    <button
+                      type="button"
+                      disabled={isSubmitting}
+                      onClick={() => handlePaymentAction('SUCCESS')}
+                      data-testid="pay-success-btn"
+                      className="flex-1 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white text-sm font-bold transition-colors"
+                    >
+                      {isSubmitting ? t.common.loading : t.booking.paySuccessBtn}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSubmitting}
+                      onClick={() => handlePaymentAction('PENDING')}
+                      data-testid="pay-pending-btn"
+                      className="py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:bg-amber-300 text-white text-sm font-bold transition-colors"
+                    >
+                      {t.booking.payPendingBtn}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSubmitting}
+                      onClick={() => handlePaymentAction('FAILED')}
+                      data-testid="pay-fail-btn"
+                      className="py-3 px-4 rounded-xl bg-red-600 hover:bg-red-700 disabled:bg-red-300 text-white text-sm font-bold transition-colors"
+                    >
+                      {t.booking.payFailBtn}
+                    </button>
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -613,9 +808,7 @@ export const BookingFlowScreen: React.FC<BookingFlowScreenProps> = ({
             </span>
           </div>
 
-          <p className="text-xs text-slate-500 leading-relaxed">
-            {t.common.demoNotice}
-          </p>
+          <p className="text-xs text-slate-500 leading-relaxed">{t.common.demoNotice}</p>
         </aside>
       </div>
     </main>

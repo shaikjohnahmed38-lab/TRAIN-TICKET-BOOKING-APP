@@ -1,9 +1,11 @@
 export interface AppConfig {
   appNamePlaceholder: string;
+  supportEmail: string;
   environmentBadge: string;
   demoDisclaimer: string;
   seatHoldDurationMinutes: number;
   maxSeatsPerBooking: number;
+  maintenanceMode: boolean;
   futureModules: {
     adminDashboardReady: boolean;
     ownerDashboardReady: boolean;
@@ -12,12 +14,14 @@ export interface AppConfig {
 }
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
-  appNamePlaceholder: '[Your App Name]',
-  environmentBadge: 'DEMO MVP · NOT OFFICIAL IRCTC',
+  appNamePlaceholder: 'TRAINSYNK',
+  supportEmail: 'support@trainsynk.in',
+  environmentBadge: 'TRAINSYNK · REAL-TIME RESERVATION ENGINE',
   demoDisclaimer:
-    'Demo booking application using simulated railway data, simulated OTP, and demo payments. Not valid for actual railway travel.',
+    'TRAINSYNK reservation platform with persistent SQLite storage, live WebSocket seat locks, and configurable payment/SMS/email gateways.',
   seatHoldDurationMinutes: 15,
   maxSeatsPerBooking: 6,
+  maintenanceMode: false,
   futureModules: {
     adminDashboardReady: true,
     ownerDashboardReady: true,

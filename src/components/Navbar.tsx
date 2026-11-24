@@ -1,5 +1,5 @@
 import React from 'react';
-import { Bell, Search, Settings, Ticket, User } from 'lucide-react';
+import { Bell, Search, Settings, Shield, Ticket, User } from 'lucide-react';
 import type { AppScreen, CustomerUser, Language } from '../types/railway';
 import type { TranslationDictionary } from '../i18n/translations';
 
@@ -32,6 +32,8 @@ export const Navbar: React.FC<NavbarProps> = ({
     activeScreen === 'booking-flow' ||
     activeScreen === 'confirmation';
 
+  const isAdminOrOperator = user?.role === 'admin' || user?.role === 'operator';
+
   return (
     <>
       {/* Desktop & Mobile Top Header (Single row, 3-zone contract on desktop) */}
@@ -46,7 +48,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             {appName}
           </button>
 
-          {/* Zone 2: 4 clean single-line text navigation links (Desktop) */}
+          {/* Zone 2: Clean single-line text navigation links (Desktop) */}
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
             <button
               type="button"
@@ -93,6 +95,21 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               {t.nav.settings}
             </button>
+            {isAdminOrOperator && (
+              <button
+                type="button"
+                onClick={() => onNavigate('admin')}
+                data-testid="nav-admin-link"
+                className={`py-1.5 border-b-2 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1 ${
+                  activeScreen === 'admin'
+                    ? 'border-blue-700 text-blue-700 font-semibold'
+                    : 'border-transparent hover:text-slate-900'
+                }`}
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span>{t.nav.admin}</span>
+              </button>
+            )}
           </nav>
 
           {/* Zone 3: 1 Primary Action (Desktop) / Compact Language + Settings (Mobile) */}
@@ -105,6 +122,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               {language === 'en' ? 'తెలుగు' : 'EN'}
             </button>
+            {isAdminOrOperator && (
+              <button
+                type="button"
+                onClick={() => onNavigate('admin')}
+                aria-label={t.nav.admin}
+                className={`md:hidden p-2 rounded-lg ${
+                  activeScreen === 'admin' ? 'text-blue-700 bg-blue-50' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Shield className="w-5 h-5" />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onNavigate('settings')}
@@ -116,6 +145,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               type="button"
               onClick={() => onNavigate('profile')}
+              data-testid="nav-profile-btn"
               className="hidden md:inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700"
             >
               <User className="w-4 h-4" />

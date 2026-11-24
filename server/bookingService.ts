@@ -2,6 +2,9 @@ import crypto from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { ensureSeatsForCoachDate } from './db';
 import { calculateDemoFare, calculateDemoRefund } from '../src/utils/fareCalculator';
+import { recordAuditLog } from './logger';
+import { sendTransactionalEmail, verifyRazorpayPaymentSignature } from './integrations';
+import { sanitizeText } from './security';
 import type {
   BookingRecord,
   BookingStatus,
@@ -12,11 +15,14 @@ import type {
   PassengerInput,
   PaymentMethod,
   PricingRule,
+  SavedPassenger,
   SeatRecord,
   Station,
   TrainSearchResult,
   TrainStop,
 } from '../src/types/railway';
+
+export { getUserByToken, updateUserProfile } from './authService';
 
 export const HOLD_DURATION_MS = 15 * 60 * 1000;
 
@@ -276,8 +282,18 @@ export function holdSeats(
   if (!params.seatNumbers || params.seatNumbers.length === 0) {
     throw new Error('Select at least one seat to hold.');
   }
-  if (params.seatNumbers.length > 6) {
-    throw new Error('Maximum 6 seats can be held at a time.');
+  const maxSeatsRow = db
+    .prepare("SELECT value FROM app_config WHERE key = 'max_seats_per_booking'")
+    .get() as { value: string } | undefined;
+  const maxSeats = Math.max(1, Number(maxSeatsRow?.value || 6));
+
+  const holdMinRow = db
+    .prepare("SELECT value FROM app_config WHERE key = 'hold_duration_minutes'")
+    .get() as { value: string } | undefined;
+  const holdDurationMs = Math.max(5, Number(holdMinRow?.value || 15)) * 60 * 1000;
+
+  if (params.seatNumbers.length > maxSeats) {
+    throw new Error(`Maximum ${maxSeats} seats can be held at a time.`);
   }
 
   const coach = db
@@ -288,7 +304,7 @@ export function holdSeats(
   }
   ensureSeatsForCoachDate(db, params.trainId, params.coachId, coach.coach_type, params.journeyDate);
 
-  const holdExpiresAt = now + HOLD_DURATION_MS;
+  const holdExpiresAt = now + holdDurationMs;
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -618,15 +634,31 @@ export function checkoutDemoBooking(
       now
     );
 
+    const txId = `TXN-${crypto.randomUUID().slice(0, 10).toUpperCase()}`;
+    db.prepare(
+      `INSERT INTO transactions (id, pnr, user_id, gateway, gateway_order_id, gateway_payment_id, amount, currency, status, raw_status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, NULL, NULL, ?, 'INR', ?, ?, ?, ?)`
+    ).run(
+      txId,
+      pnr,
+      params.userId,
+      params.paymentMethod,
+      fare.totalFare,
+      paymentStatus,
+      params.outcome,
+      now,
+      now
+    );
+
     if (params.outcome === 'SUCCESS') {
       createNotification(db, {
         userId: params.userId,
         sessionId: params.sessionId,
         type: 'BOOKING_CONFIRMED',
-        titleEn: `Demo Booking ${bookingStatus}: PNR ${pnr}`,
-        titleTe: `డెమో బుకింగ్ ${bookingStatus}: PNR ${pnr}`,
-        messageEn: `Simulated ${train.train_number} ${train.name_en} (${coach.coach_code}, Seats ${params.seatNumbers.join(', ')}) booked via ${params.paymentMethod}.`,
-        messageTe: `${train.train_number} ${train.name_te} (${coach.coach_code}, సీట్లు ${params.seatNumbers.join(', ')}) డెమో బుకింగ్ పూర్తయింది.`,
+        titleEn: `Booking ${bookingStatus}: PNR ${pnr}`,
+        titleTe: `బుకింగ్ ${bookingStatus}: PNR ${pnr}`,
+        messageEn: `${train.train_number} ${train.name_en} (${coach.coach_code}, Seats ${params.seatNumbers.join(', ')}) confirmed via ${params.paymentMethod}.`,
+        messageTe: `${train.train_number} ${train.name_te} (${coach.coach_code}, సీట్లు ${params.seatNumbers.join(', ')}) బుకింగ్ పూర్తయింది.`,
         nowMs: now,
       });
     } else if (params.outcome === 'FAILED') {
@@ -634,10 +666,10 @@ export function checkoutDemoBooking(
         userId: params.userId,
         sessionId: params.sessionId,
         type: 'PAYMENT_FAILED',
-        titleEn: `Demo Payment Failed: PNR ${pnr}`,
-        titleTe: `డెమో చెల్లింపు విఫలం: PNR ${pnr}`,
-        messageEn: `Simulated payment failed. Seats ${params.seatNumbers.join(', ')} remain held until the 15-minute timer expires.`,
-        messageTe: `నమూనా చెల్లింపు విఫలమైంది. 15 నిమిషాల వరకు సీట్లు హోల్డ్‌లో ఉంటాయి.`,
+        titleEn: `Payment Failed: PNR ${pnr}`,
+        titleTe: `చెల్లింపు విఫలం: PNR ${pnr}`,
+        messageEn: `Payment failed. Seats ${params.seatNumbers.join(', ')} remain held until the hold timer expires.`,
+        messageTe: `చెల్లింపు విఫలమైంది. హోల్డ్ టైమర్ ముగిసే వరకు సీట్లు హోల్డ్‌లో ఉంటాయి.`,
         nowMs: now,
       });
     }
@@ -650,14 +682,43 @@ export function checkoutDemoBooking(
     throw err;
   }
 
+  recordAuditLog(db, {
+    actorId: params.userId,
+    actorLabel: params.userId ?? params.sessionId,
+    action: `BOOKING_${bookingRecord.status}`,
+    targetType: 'BOOKING',
+    targetId: bookingRecord.pnr,
+    metadata: {
+      trainNumber: train.train_number,
+      coachCode: coach.coach_code,
+      seatCount: params.seatNumbers.length,
+      totalFare: fare.totalFare,
+      paymentMethod: params.paymentMethod,
+    },
+    nowMs: now,
+  });
+
+  if (params.outcome === 'SUCCESS' && params.userId) {
+    const userRow = db.prepare('SELECT email, name FROM users WHERE id = ?').get(params.userId) as
+      | { email: string; name: string }
+      | undefined;
+    if (userRow?.email) {
+      void sendTransactionalEmail({
+        to: userRow.email,
+        subject: `TRAINSYNK Ticket Confirmed — PNR ${bookingRecord.pnr}`,
+        text: `Hi ${userRow.name}, your ticket on #${train.train_number} ${train.name_en} (${params.fromCode} to ${params.toCode} on ${params.journeyDate}) is ${bookingRecord.status}. Coach ${coach.coach_code}, Seats: ${params.seatNumbers.join(', ')}. Total Fare: INR ${fare.totalFare}.`,
+      });
+    }
+  }
+
   return {
     booking: bookingRecord,
     message:
       params.outcome === 'SUCCESS'
-        ? 'Demo booking confirmed'
+        ? 'Booking confirmed'
         : params.outcome === 'PENDING'
-        ? 'Demo payment pending'
-        : 'Demo payment failed',
+        ? 'Payment pending'
+        : 'Payment failed',
   };
 }
 
@@ -711,14 +772,14 @@ export function listBookings(
     ? (db
         .prepare(
           `SELECT * FROM bookings
-           WHERE user_id = ? OR session_id = ? OR session_id = 'DEMO-GLOBAL'
+           WHERE user_id = ?
            ORDER BY created_at DESC`
         )
-        .all(userId, sessionId) as Array<Record<string, unknown>>)
+        .all(userId) as Array<Record<string, unknown>>)
     : (db
         .prepare(
           `SELECT * FROM bookings
-           WHERE session_id = ? OR session_id = 'DEMO-GLOBAL'
+           WHERE session_id = ? AND user_id IS NULL
            ORDER BY created_at DESC`
         )
         .all(sessionId) as Array<Record<string, unknown>>);
@@ -726,17 +787,53 @@ export function listBookings(
   return rows.map(mapBookingRow);
 }
 
+function assertBookingOwnership(
+  existing: BookingRecord,
+  userId: string | null,
+  sessionId: string,
+  userRole?: string
+): void {
+  if (userRole === 'admin' || userRole === 'operator') return;
+  if (userId && existing.userId === userId) return;
+  if (!existing.userId && existing.sessionId === sessionId) return;
+  const err = new Error('You do not have permission to access or modify this booking.') as Error & {
+    statusCode?: number;
+  };
+  err.statusCode = 403;
+  throw err;
+}
+
+export function getBookingByPnrScoped(
+  db: DatabaseSync,
+  pnr: string,
+  userId: string | null,
+  sessionId: string,
+  userRole?: string
+): BookingRecord {
+  const existing = getBookingByPnr(db, pnr);
+  if (!existing) {
+    const err = new Error('Booking not found.') as Error & { statusCode?: number };
+    err.statusCode = 404;
+    throw err;
+  }
+  assertBookingOwnership(existing, userId, sessionId, userRole);
+  return existing;
+}
+
 export function cancelBooking(
   db: DatabaseSync,
   pnr: string,
   userId: string | null,
   sessionId: string,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  userRole?: string
 ): BookingRecord {
   const existing = getBookingByPnr(db, pnr);
   if (!existing) {
     throw new Error('Booking not found.');
   }
+  assertBookingOwnership(existing, userId, sessionId, userRole);
+
   if (existing.status === 'CANCELLED') {
     return existing;
   }
@@ -769,13 +866,13 @@ export function cancelBooking(
     ).run(existing.coachId, existing.journeyDate, ...existing.seatNumbers);
 
     createNotification(db, {
-      userId,
-      sessionId,
+      userId: existing.userId ?? userId,
+      sessionId: existing.sessionId ?? sessionId,
       type: 'TICKET_CANCELLED',
-      titleEn: `Demo Ticket Cancelled: PNR ${pnr}`,
-      titleTe: `డెమో టికెట్ రద్దు చేయబడింది: PNR ${pnr}`,
-      messageEn: `Seats ${existing.seatNumbers.join(', ')} in ${existing.coachCode} released. Simulated refund: INR ${refund.refundAmount}.`,
-      messageTe: `${existing.coachCode} లో సీట్లు ${existing.seatNumbers.join(', ')} విడుదలయ్యాయి. నమూనా రీఫండ్: ₹${refund.refundAmount}.`,
+      titleEn: `Ticket Cancelled: PNR ${pnr}`,
+      titleTe: `టికెట్ రద్దు చేయబడింది: PNR ${pnr}`,
+      messageEn: `Seats ${existing.seatNumbers.join(', ')} in ${existing.coachCode} released. Refund: INR ${refund.refundAmount}.`,
+      messageTe: `${existing.coachCode} లో సీట్లు ${existing.seatNumbers.join(', ')} విడుదలయ్యాయి. రీఫండ్: ₹${refund.refundAmount}.`,
       nowMs,
     });
 
@@ -785,6 +882,16 @@ export function cancelBooking(
     throw err;
   }
 
+  recordAuditLog(db, {
+    actorId: userId,
+    actorLabel: userId ?? sessionId,
+    action: 'BOOKING_CANCELLED',
+    targetType: 'BOOKING',
+    targetId: pnr,
+    metadata: { refundAmount: refund.refundAmount, refundStatus },
+    nowMs,
+  });
+
   return getBookingByPnr(db, pnr)!;
 }
 
@@ -793,10 +900,12 @@ export function advanceRefundSimulation(
   pnr: string,
   userId: string | null,
   sessionId: string,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  userRole?: string
 ): BookingRecord {
   const existing = getBookingByPnr(db, pnr);
   if (!existing) throw new Error('Booking not found.');
+  assertBookingOwnership(existing, userId, sessionId, userRole);
   if (existing.status !== 'CANCELLED') throw new Error('Only cancelled bookings have refunds.');
 
   const nextStatus =
@@ -814,18 +923,178 @@ export function advanceRefundSimulation(
 
   if (nextStatus !== existing.refundStatus) {
     createNotification(db, {
-      userId,
-      sessionId,
+      userId: existing.userId ?? userId,
+      sessionId: existing.sessionId ?? sessionId,
       type: 'REFUND_UPDATE',
-      titleEn: `Simulated Refund ${nextStatus}: PNR ${pnr}`,
-      titleTe: `నమూనా రీఫండ్ ${nextStatus}: PNR ${pnr}`,
-      messageEn: `Demo refund of INR ${existing.refundAmount} updated to ${nextStatus}.`,
-      messageTe: `₹${existing.refundAmount} నమూనా రీఫండ్ స్థితి ${nextStatus} కు మారింది.`,
+      titleEn: `Refund ${nextStatus}: PNR ${pnr}`,
+      titleTe: `రీఫండ్ ${nextStatus}: PNR ${pnr}`,
+      messageEn: `Refund of INR ${existing.refundAmount} updated to ${nextStatus}.`,
+      messageTe: `₹${existing.refundAmount} రీఫండ్ స్థితి ${nextStatus} కు మారింది.`,
       nowMs,
     });
   }
 
   return getBookingByPnr(db, pnr)!;
+}
+
+export function recordRazorpayOrderForBooking(
+  db: DatabaseSync,
+  params: { pnr: string; userId: string | null; orderId: string; amount: number }
+): void {
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO transactions (id, pnr, user_id, gateway, gateway_order_id, gateway_payment_id, amount, currency, status, raw_status, created_at, updated_at)
+     VALUES (?, ?, ?, 'RAZORPAY', ?, NULL, ?, 'INR', 'CREATED', 'order_created', ?, ?)`
+  ).run(
+    `TXN-${crypto.randomUUID().slice(0, 10).toUpperCase()}`,
+    params.pnr,
+    params.userId,
+    params.orderId,
+    params.amount,
+    now,
+    now
+  );
+}
+
+export function verifyAndFinalizeRazorpayPayment(
+  db: DatabaseSync,
+  params: {
+    pnr: string;
+    orderId: string;
+    paymentId: string;
+    signature: string;
+    userId: string | null;
+    sessionId: string;
+  }
+): BookingRecord {
+  const valid = verifyRazorpayPaymentSignature({
+    orderId: params.orderId,
+    paymentId: params.paymentId,
+    signature: params.signature,
+  });
+  if (!valid) {
+    throw new Error('Payment signature verification failed.');
+  }
+
+  const booking = getBookingByPnr(db, params.pnr);
+  if (!booking) throw new Error('Booking not found.');
+
+  const now = Date.now();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const placeholders = booking.seatNumbers.map(() => '?').join(',');
+    db.prepare(
+      `UPDATE bookings
+       SET status = CASE WHEN status = 'WL' THEN 'WL' ELSE 'CONFIRMED' END,
+           payment_status = 'SUCCESS',
+           payment_method = 'RAZORPAY',
+           hold_expires_at = NULL,
+           updated_at = ?
+       WHERE pnr = ?`
+    ).run(now, booking.pnr);
+
+    db.prepare(
+      `UPDATE seats
+       SET status = CASE WHEN status = 'WAITING_LIST' THEN 'WAITING_LIST' ELSE 'BOOKED' END,
+           held_by_session = NULL,
+           hold_expires_at = NULL,
+           booked_pnr = ?
+       WHERE coach_id = ? AND journey_date = ? AND seat_number IN (${placeholders})`
+    ).run(booking.pnr, booking.coachId, booking.journeyDate, ...booking.seatNumbers);
+
+    db.prepare(
+      `UPDATE transactions
+       SET gateway_payment_id = ?, status = 'SUCCESS', raw_status = 'captured', updated_at = ?
+       WHERE gateway_order_id = ?`
+    ).run(params.paymentId, now, params.orderId);
+
+    createNotification(db, {
+      userId: booking.userId ?? params.userId,
+      sessionId: booking.sessionId ?? params.sessionId,
+      type: 'BOOKING_CONFIRMED',
+      titleEn: `Payment Verified & Confirmed: PNR ${booking.pnr}`,
+      titleTe: `చెల్లింపు ధృవీకరించబడింది: PNR ${booking.pnr}`,
+      messageEn: `Razorpay payment ${params.paymentId} captured for PNR ${booking.pnr}.`,
+      messageTe: `PNR ${booking.pnr} కోసం Razorpay చెల్లింపు విజయవంతమైంది.`,
+      nowMs: now,
+    });
+
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+
+  return getBookingByPnr(db, booking.pnr)!;
+}
+
+export function listSavedPassengers(db: DatabaseSync, userId: string): SavedPassenger[] {
+  const rows = db
+    .prepare(
+      'SELECT id, full_name, age, gender, berth_preference, created_at FROM passenger_profiles WHERE user_id = ? ORDER BY created_at DESC'
+    )
+    .all(userId) as Array<{
+    id: string;
+    full_name: string;
+    age: number;
+    gender: SavedPassenger['gender'];
+    berth_preference: string | null;
+    created_at: number;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    fullName: r.full_name,
+    age: r.age,
+    gender: r.gender,
+    berthPreference: r.berth_preference,
+    createdAt: r.created_at,
+  }));
+}
+
+export function addSavedPassenger(
+  db: DatabaseSync,
+  userId: string,
+  input: { fullName: string; age: number; gender: SavedPassenger['gender']; berthPreference?: string }
+): SavedPassenger {
+  const fullName = sanitizeText(input.fullName, 80);
+  const age = Number(input.age);
+  if (fullName.length < 2) throw new Error('Passenger name must be at least 2 characters.');
+  if (!Number.isFinite(age) || age < 1 || age > 115) {
+    throw new Error('Passenger age must be between 1 and 115.');
+  }
+  if (!['Male', 'Female', 'Other'].includes(input.gender)) {
+    throw new Error('Invalid gender selection.');
+  }
+
+  const count = db
+    .prepare('SELECT COUNT(*) as cnt FROM passenger_profiles WHERE user_id = ?')
+    .get(userId) as { cnt: number };
+  if (count.cnt >= 15) {
+    throw new Error('Maximum 15 saved co-travellers allowed.');
+  }
+
+  const id = `PAX-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+  const now = Date.now();
+  const berthPreference = input.berthPreference ? sanitizeText(input.berthPreference, 10) : null;
+
+  db.prepare(
+    `INSERT INTO passenger_profiles (id, user_id, full_name, age, gender, berth_preference, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, userId, fullName, age, input.gender, berthPreference, now);
+
+  return {
+    id,
+    fullName,
+    age,
+    gender: input.gender,
+    berthPreference,
+    createdAt: now,
+  };
+}
+
+export function deleteSavedPassenger(db: DatabaseSync, userId: string, passengerId: string): void {
+  db.prepare('DELETE FROM passenger_profiles WHERE id = ? AND user_id = ?').run(passengerId, userId);
 }
 
 export function listNotifications(
@@ -966,57 +1235,4 @@ export function verifyDemoOtp(
       gender: userRow.gender,
     },
   };
-}
-
-export function getUserByToken(
-  db: DatabaseSync,
-  token: string | null | undefined,
-  nowMs: number = Date.now()
-): CustomerUser | null {
-  if (!token) return null;
-  const session = db
-    .prepare('SELECT user_id, expires_at FROM sessions WHERE token = ?')
-    .get(token) as { user_id: string; expires_at: number } | undefined;
-  if (!session || session.expires_at < nowMs) return null;
-
-  const userRow = db
-    .prepare('SELECT id, mobile, name, email, age, gender FROM users WHERE id = ?')
-    .get(session.user_id) as
-    | {
-        id: string;
-        mobile: string;
-        name: string;
-        email: string;
-        age: number | null;
-        gender: CustomerUser['gender'];
-      }
-    | undefined;
-
-  return userRow ?? null;
-}
-
-export function updateUserProfile(
-  db: DatabaseSync,
-  userId: string,
-  updates: {
-    name: string;
-    email: string;
-    age: number | null;
-    gender: CustomerUser['gender'];
-  }
-): CustomerUser {
-  if (!updates.name.trim()) {
-    throw new Error('Customer name cannot be empty.');
-  }
-  db.prepare('UPDATE users SET name = ?, email = ?, age = ?, gender = ? WHERE id = ?').run(
-    updates.name.trim(),
-    updates.email.trim(),
-    updates.age,
-    updates.gender,
-    userId
-  );
-  const row = db
-    .prepare('SELECT id, mobile, name, email, age, gender FROM users WHERE id = ?')
-    .get(userId) as unknown as CustomerUser;
-  return row;
 }

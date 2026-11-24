@@ -14,9 +14,11 @@ export type BookingStatus =
   | 'PAYMENT_PENDING'
   | 'PAYMENT_FAILED';
 
-export type PaymentMethod = 'UPI' | 'PHONEPE' | 'GPAY' | 'CARD';
+export type PaymentMethod = 'UPI' | 'PHONEPE' | 'GPAY' | 'CARD' | 'RAZORPAY';
 
 export type RefundStatus = 'NOT_APPLICABLE' | 'INITIATED' | 'PROCESSING' | 'REFUNDED';
+
+export type UserRole = 'customer' | 'operator' | 'admin';
 
 export interface Station {
   code: string;
@@ -96,6 +98,15 @@ export interface PassengerInput {
   gender: 'Male' | 'Female' | 'Other';
 }
 
+export interface SavedPassenger {
+  id: string;
+  fullName: string;
+  age: number;
+  gender: 'Male' | 'Female' | 'Other';
+  berthPreference: string | null;
+  createdAt: number;
+}
+
 export interface BookingRecord {
   pnr: string;
   userId: string | null;
@@ -135,6 +146,21 @@ export interface CustomerUser {
   email: string;
   age: number | null;
   gender: 'Male' | 'Female' | 'Other' | null;
+  role?: UserRole;
+  isVerified?: boolean;
+  isActive?: boolean;
+  hasPassword?: boolean;
+  createdAt?: number;
+  lastLoginAt?: number | null;
+}
+
+export interface UserSessionInfo {
+  id: string;
+  userAgent: string;
+  ipAddress: string;
+  createdAt: number;
+  expiresAt: number;
+  isCurrent: boolean;
 }
 
 export interface NotificationItem {
@@ -147,7 +173,8 @@ export interface NotificationItem {
     | 'REFUND_UPDATE'
     | 'TRAIN_DELAY'
     | 'PLATFORM_CHANGE'
-    | 'JOURNEY_REMINDER';
+    | 'JOURNEY_REMINDER'
+    | 'SYSTEM_ALERT';
   titleEn: string;
   titleTe: string;
   messageEn: string;
@@ -155,6 +182,104 @@ export interface NotificationItem {
   isSimulated: boolean;
   read: boolean;
   createdAt: number;
+}
+
+export interface IntegrationItemStatus {
+  key: string;
+  label: string;
+  configured: boolean;
+  provider: string;
+  missingVars: string[];
+  description: string;
+}
+
+export interface IntegrationStatusMap {
+  database: IntegrationItemStatus;
+  realtime: IntegrationItemStatus;
+  smtpEmail: IntegrationItemStatus;
+  twilioSms: IntegrationItemStatus;
+  razorpayPayments: IntegrationItemStatus;
+  officialRailwayApi: IntegrationItemStatus;
+}
+
+export interface AppConfigRecord {
+  appName: string;
+  supportEmail: string;
+  holdDurationMinutes: number;
+  maxSeatsPerBooking: number;
+  maintenanceMode: boolean;
+}
+
+export interface TransactionRecord {
+  id: string;
+  pnr: string;
+  userId: string | null;
+  gateway: string;
+  gatewayOrderId: string | null;
+  gatewayPaymentId: string | null;
+  amount: number;
+  currency: string;
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  actorId: string | null;
+  actorLabel: string;
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  metadata: Record<string, unknown>;
+  ipAddress: string;
+  createdAt: number;
+}
+
+export interface AdminAnalytics {
+  totalRevenue: number;
+  totalBookings: number;
+  confirmedBookings: number;
+  cancelledBookings: number;
+  pendingRefunds: number;
+  totalUsers: number;
+  verifiedUsers: number;
+  activeHolds: number;
+  totalTrains: number;
+  classBreakdown: Array<{
+    coachType: CoachType;
+    bookings: number;
+    revenue: number;
+  }>;
+  topRoutes: Array<{
+    route: string;
+    bookings: number;
+    revenue: number;
+  }>;
+}
+
+export interface AdminTrainRecord {
+  id: string;
+  trainNumber: string;
+  nameEn: string;
+  nameTe: string;
+  runningDays: string[];
+  stops: TrainStop[];
+  coaches: Array<{
+    id: string;
+    coachCode: string;
+    coachType: CoachType;
+    sortOrder: number;
+    totalSeats: number;
+  }>;
+}
+
+export interface PaginatedResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
 }
 
 export type AppScreen =
@@ -167,4 +292,5 @@ export type AppScreen =
   | 'my-bookings'
   | 'notifications'
   | 'profile'
-  | 'settings';
+  | 'settings'
+  | 'admin';

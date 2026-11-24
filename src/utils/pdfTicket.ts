@@ -11,31 +11,37 @@ export function downloadDemoTicketPdf(
     format: 'a4',
   });
 
-  // Watermark header strip
+  // Header strip
   doc.setFillColor(29, 78, 216);
   doc.rect(0, 0, 210, 26, 'F');
 
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(16);
-  doc.text(appNamePlaceholder, 14, 12);
+  doc.text(appNamePlaceholder || 'TRAINSYNK', 14, 12);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
-  doc.text('ELECTRONIC RESERVATION SLIP (DEMO E-TICKET)', 14, 19);
+  doc.text('ELECTRONIC RESERVATION SLIP (E-TICKET)', 14, 19);
 
-  doc.setFillColor(254, 243, 199);
-  doc.rect(128, 6, 68, 12, 'F');
-  doc.setTextColor(146, 64, 14);
+  const isRazorpay = booking.paymentMethod === 'RAZORPAY';
+  doc.setFillColor(isRazorpay ? 220 : 254, isRazorpay ? 252 : 243, isRazorpay ? 231 : 199);
+  doc.rect(126, 6, 70, 12, 'F');
+  doc.setTextColor(isRazorpay ? 22 : 146, isRazorpay ? 101 : 64, isRazorpay ? 52 : 14);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.text('DEMO - NOT VALID FOR TRAVEL', 162, 13.5, { align: 'center' });
+  doc.setFontSize(8.5);
+  doc.text(
+    isRazorpay ? 'GATEWAY VERIFIED RECEIPT' : 'LOCAL RESERVATION RECORD',
+    161,
+    13.5,
+    { align: 'center' }
+  );
 
-  // Diagonal light watermark across ticket body
-  doc.setTextColor(235, 238, 245);
+  // Subtle watermark across ticket body
+  doc.setTextColor(238, 242, 247);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(34);
-  doc.text('DEMO - NOT VALID FOR TRAVEL', 105, 165, {
+  doc.text(appNamePlaceholder || 'TRAINSYNK', 105, 165, {
     align: 'center',
     angle: 35,
   });
@@ -48,7 +54,7 @@ export function downloadDemoTicketPdf(
   doc.setTextColor(100, 116, 139);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.5);
-  doc.text('DEMO PNR NUMBER', 20, 42);
+  doc.text('PNR NUMBER', 20, 42);
   doc.text('BOOKING STATUS', 92, 42);
   doc.text('BOOKING DATE', 148, 42);
 
@@ -161,39 +167,39 @@ export function downloadDemoTicketPdf(
   doc.setTextColor(100, 116, 139);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.5);
-  doc.text('PAYMENT METHOD (DEMO)', 20, fareBoxTop + 8);
+  doc.text('PAYMENT METHOD', 20, fareBoxTop + 8);
   doc.text('SEAT NUMBERS', 85, fareBoxTop + 8);
-  doc.text('TOTAL DEMO FARE', 148, fareBoxTop + 8);
+  doc.text('TOTAL FARE', 148, fareBoxTop + 8);
 
   doc.setTextColor(15, 23, 42);
   doc.setFontSize(10.5);
-  doc.text(booking.paymentMethod ?? 'DEMO GATEWAY', 20, fareBoxTop + 16);
+  doc.text(booking.paymentMethod ?? 'CHECKOUT', 20, fareBoxTop + 16);
   doc.setFont('courier', 'bold');
   doc.text(booking.seatNumbers.join(', '), 85, fareBoxTop + 16);
   doc.setTextColor(29, 78, 216);
   doc.setFontSize(12);
   doc.text(`INR ${booking.totalFare.toFixed(2)}`, 148, fareBoxTop + 16);
 
-  // Footer Disclaimer
-  doc.setDrawColor(220, 38, 38);
-  doc.setFillColor(254, 242, 242);
+  // Footer Notice
+  doc.setDrawColor(203, 213, 225);
+  doc.setFillColor(248, 250, 252);
   doc.roundedRect(14, 252, 182, 24, 2, 2, 'FD');
-  doc.setTextColor(185, 28, 28);
+  doc.setTextColor(51, 65, 85);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9.5);
-  doc.text('IMPORTANT NOTICE: DEMO – NOT VALID FOR TRAVEL', 20, 260);
+  doc.text(`${appNamePlaceholder || 'TRAINSYNK'} RESERVATION RECORD`, 20, 260);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
   doc.text(
-    'This ticket was generated inside a Railway Booking MVP demonstration environment.',
+    'This electronic reservation slip was generated from your persistent TRAINSYNK booking record.',
     20,
     266
   );
   doc.text(
-    'It is not issued by Indian Railways or IRCTC and cannot be used to board any train.',
+    'External Indian Railways / IRCTC carrier validity requires authorized official railway API provisioning.',
     20,
     271
   );
 
-  doc.save(`Demo-Ticket-${booking.pnr}.pdf`);
+  doc.save(`TRAINSYNK-Ticket-${booking.pnr}.pdf`);
 }

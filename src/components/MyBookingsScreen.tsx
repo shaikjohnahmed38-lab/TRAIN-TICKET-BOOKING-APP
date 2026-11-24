@@ -14,6 +14,8 @@ interface MyBookingsScreenProps {
   t: TranslationDictionary;
 }
 
+const PAGE_SIZE = 10;
+
 export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
   bookings,
   appName,
@@ -23,12 +25,12 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
   language,
   t,
 }) => {
-  const [activeTab, setActiveTab] = useState<'upcoming' | 'completed' | 'cancelled'>(
-    'upcoming'
-  );
+  const [activeTab, setActiveTab] = useState<'upcoming' | 'completed' | 'cancelled'>('upcoming');
   const [searchQuery, setSearchQuery] = useState('');
+  const [page, setPage] = useState(1);
   const [cancelTarget, setCancelTarget] = useState<string | null>(null);
   const [busyPnr, setBusyPnr] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const todayStr = new Date().toISOString().slice(0, 10);
 
@@ -37,12 +39,8 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
       activeTab === 'cancelled'
         ? b.status === 'CANCELLED' || b.status === 'PAYMENT_FAILED'
         : activeTab === 'completed'
-        ? b.status !== 'CANCELLED' &&
-          b.status !== 'PAYMENT_FAILED' &&
-          b.journeyDate < todayStr
-        : b.status !== 'CANCELLED' &&
-          b.status !== 'PAYMENT_FAILED' &&
-          b.journeyDate >= todayStr;
+        ? b.status !== 'CANCELLED' && b.status !== 'PAYMENT_FAILED' && b.journeyDate < todayStr
+        : b.status !== 'CANCELLED' && b.status !== 'PAYMENT_FAILED' && b.journeyDate >= todayStr;
 
     if (!matchesTab) return false;
     const q = searchQuery.trim().toLowerCase();
@@ -55,6 +53,10 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
       b.toCode.toLowerCase().includes(q)
     );
   });
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   return (
     <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 md:py-8 pb-24 md:pb-12 space-y-6">
@@ -82,7 +84,10 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
               type="button"
               role="tab"
               aria-selected={activeTab === tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => {
+                setActiveTab(tab.id);
+                setPage(1);
+              }}
               className={`px-3.5 py-1.5 text-xs sm:text-sm font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === tab.id
                   ? 'bg-white text-blue-700 shadow-xs'
@@ -101,15 +106,24 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
         <input
           type="text"
           value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
+          onChange={(e) => {
+            setSearchQuery(e.target.value);
+            setPage(1);
+          }}
           placeholder={t.myBookings.searchPlaceholder}
           aria-label={t.myBookings.searchPlaceholder}
           className="w-full h-11 pl-10 pr-4 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
         />
       </div>
 
+      {actionError && (
+        <div role="alert" className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-medium">
+          {actionError}
+        </div>
+      )}
+
       {/* Bookings List */}
-      {filtered.length === 0 ? (
+      {paged.length === 0 ? (
         <div className="bg-white border border-slate-200 rounded-2xl p-8 sm:p-12 text-center space-y-3">
           <div className="w-12 h-12 mx-auto rounded-xl bg-slate-100 text-slate-500 flex items-center justify-center">
             <Ticket className="w-6 h-6" />
@@ -126,7 +140,7 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
         </div>
       ) : (
         <div className="space-y-4">
-          {filtered.map((booking) => {
+          {paged.map((booking) => {
             const isCancelled = booking.status === 'CANCELLED';
             const canCancel =
               booking.status === 'CONFIRMED' ||
@@ -189,16 +203,14 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
                       </span>
                     </span>
                     <span className="text-slate-400 mx-2">·</span>
-                    <span>
-                      {booking.passengers.map((p) => p.fullName).join(', ')}
-                    </span>
+                    <span>{booking.passengers.map((p) => p.fullName).join(', ')}</span>
                   </div>
-                  <span className="text-red-700 font-semibold">
-                    {t.confirmation.notValidTravel}
+                  <span className="text-slate-500 font-medium">
+                    {booking.paymentMethod ?? 'CHECKOUT'} · {booking.paymentStatus}
                   </span>
                 </div>
 
-                {/* Simulated Refund Tracker when Cancelled */}
+                {/* Refund Tracker when Cancelled */}
                 {isCancelled && booking.refundStatus !== 'NOT_APPLICABLE' && (
                   <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-3">
                     <div className="text-xs space-y-0.5">
@@ -219,8 +231,11 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
                         disabled={busyPnr === booking.pnr}
                         onClick={async () => {
                           setBusyPnr(booking.pnr);
+                          setActionError(null);
                           try {
                             await onAdvanceRefund(booking.pnr);
+                          } catch (err) {
+                            setActionError((err as Error).message);
                           } finally {
                             setBusyPnr(null);
                           }
@@ -228,7 +243,7 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-white border border-blue-200 rounded-lg hover:bg-blue-50"
                       >
                         <RefreshCw className="w-3.5 h-3.5" />
-                        <span>Simulate Next Refund Stage</span>
+                        <span>Update Refund Stage</span>
                       </button>
                     )}
                   </div>
@@ -278,9 +293,12 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
                         disabled={busyPnr === booking.pnr}
                         onClick={async () => {
                           setBusyPnr(booking.pnr);
+                          setActionError(null);
                           try {
                             await onCancelBooking(booking.pnr);
                             setCancelTarget(null);
+                          } catch (err) {
+                            setActionError((err as Error).message);
                           } finally {
                             setBusyPnr(null);
                           }
@@ -296,6 +314,30 @@ export const MyBookingsScreen: React.FC<MyBookingsScreenProps> = ({
               </article>
             );
           })}
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-end gap-2 pt-2 text-xs">
+              <button
+                type="button"
+                disabled={safePage <= 1}
+                onClick={() => setPage((p) => p - 1)}
+                className="px-3 py-1.5 border border-slate-200 bg-white rounded-lg disabled:opacity-40"
+              >
+                Prev
+              </button>
+              <span className="font-mono-tabular text-slate-600">
+                Page {safePage} / {totalPages}
+              </span>
+              <button
+                type="button"
+                disabled={safePage >= totalPages}
+                onClick={() => setPage((p) => p + 1)}
+                className="px-3 py-1.5 border border-slate-200 bg-white rounded-lg disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          )}
         </div>
       )}
     </main>

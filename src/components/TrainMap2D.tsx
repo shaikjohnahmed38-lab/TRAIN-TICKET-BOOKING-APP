@@ -25,6 +25,7 @@ interface TrainMap2DProps {
   seats: SeatRecord[];
   selectedSeatNumbers: number[];
   sessionId: string;
+  holdDurationMinutes?: number;
   isLoadingSeats: boolean;
   isHolding: boolean;
   errorMsg: string | null;
@@ -43,6 +44,7 @@ export const TrainMap2D: React.FC<TrainMap2DProps> = ({
   seats,
   selectedSeatNumbers,
   sessionId,
+  holdDurationMinutes = 15,
   isLoadingSeats,
   isHolding,
   errorMsg,
@@ -380,7 +382,11 @@ export const TrainMap2D: React.FC<TrainMap2DProps> = ({
                 className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-blue-700 hover:bg-blue-800 disabled:bg-slate-300 disabled:text-slate-500 text-white text-sm font-bold transition-colors whitespace-nowrap shrink-0"
               >
                 <Clock className="w-4 h-4" />
-                <span>{isHolding ? t.common.loading : t.trainMap.holdAndProceed}</span>
+                <span>
+                  {isHolding
+                    ? t.common.loading
+                    : `${t.trainMap.holdAndProceed} (${holdDurationMinutes}m)`}
+                </span>
               </button>
             </div>
           </section>

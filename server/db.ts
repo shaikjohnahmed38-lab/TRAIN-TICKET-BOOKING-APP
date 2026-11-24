@@ -314,6 +314,301 @@ export const DEMO_TRAINS: TrainSeedSpec[] = [
 ];
 
 let dbInstance: DatabaseSync | null = null;
+let activeDbPathLabel = 'data/rail_demo.db';
+
+function getTableColumns(db: DatabaseSync, table: string): Set<string> {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return new Set(rows.map((r) => r.name));
+}
+
+function runMigrations(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at INTEGER NOT NULL
+    );
+  `);
+
+  const applied = new Set(
+    (db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map(
+      (r) => r.version
+    )
+  );
+
+  if (!applied.has(1)) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS stations (
+        code TEXT PRIMARY KEY,
+        name_en TEXT NOT NULL,
+        name_te TEXT NOT NULL,
+        city TEXT NOT NULL,
+        state TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS trains (
+        id TEXT PRIMARY KEY,
+        train_number TEXT NOT NULL UNIQUE,
+        name_en TEXT NOT NULL,
+        name_te TEXT NOT NULL,
+        running_days_json TEXT NOT NULL,
+        stops_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS coaches (
+        id TEXT PRIMARY KEY,
+        train_id TEXT NOT NULL,
+        coach_code TEXT NOT NULL,
+        coach_type TEXT NOT NULL,
+        sort_order INTEGER NOT NULL,
+        total_seats INTEGER NOT NULL,
+        FOREIGN KEY (train_id) REFERENCES trains(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS seats (
+        id TEXT PRIMARY KEY,
+        coach_id TEXT NOT NULL,
+        train_id TEXT NOT NULL,
+        journey_date TEXT NOT NULL,
+        seat_number INTEGER NOT NULL,
+        berth_type TEXT NOT NULL,
+        bay_number INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        held_by_session TEXT,
+        hold_expires_at INTEGER,
+        booked_pnr TEXT,
+        UNIQUE(coach_id, journey_date, seat_number)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_seats_lookup
+        ON seats (train_id, coach_id, journey_date);
+
+      CREATE TABLE IF NOT EXISTS pricing_config (
+        coach_type TEXT PRIMARY KEY,
+        label_en TEXT NOT NULL,
+        label_te TEXT NOT NULL,
+        base_fare REAL NOT NULL,
+        per_km_rate REAL NOT NULL,
+        reservation_fee REAL NOT NULL,
+        gst_percent REAL NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        mobile TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        age INTEGER,
+        gender TEXT,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS otp_challenges (
+        mobile TEXT PRIMARY KEY,
+        otp_code TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        mobile TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS bookings (
+        pnr TEXT PRIMARY KEY,
+        user_id TEXT,
+        session_id TEXT NOT NULL,
+        train_id TEXT NOT NULL,
+        train_number TEXT NOT NULL,
+        train_name_en TEXT NOT NULL,
+        train_name_te TEXT NOT NULL,
+        from_code TEXT NOT NULL,
+        from_name_en TEXT NOT NULL,
+        to_code TEXT NOT NULL,
+        to_name_en TEXT NOT NULL,
+        departure_time TEXT NOT NULL,
+        arrival_time TEXT NOT NULL,
+        journey_date TEXT NOT NULL,
+        coach_id TEXT NOT NULL,
+        coach_code TEXT NOT NULL,
+        coach_type TEXT NOT NULL,
+        seat_numbers_json TEXT NOT NULL,
+        passengers_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payment_method TEXT,
+        payment_status TEXT NOT NULL,
+        fare_per_seat REAL NOT NULL,
+        total_fare REAL NOT NULL,
+        hold_expires_at INTEGER,
+        refund_status TEXT NOT NULL,
+        refund_amount REAL NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS notifications (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        session_id TEXT,
+        type TEXT NOT NULL,
+        title_en TEXT NOT NULL,
+        title_te TEXT NOT NULL,
+        message_en TEXT NOT NULL,
+        message_te TEXT NOT NULL,
+        is_simulated INTEGER NOT NULL DEFAULT 1,
+        read INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+    `);
+
+    db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
+      1,
+      'initial_core_schema',
+      Date.now()
+    );
+  }
+
+  if (!applied.has(2)) {
+    const userCols = getTableColumns(db, 'users');
+    if (!userCols.has('password_hash')) {
+      db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT;');
+    }
+    if (!userCols.has('role')) {
+      db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'customer';");
+    }
+    if (!userCols.has('is_verified')) {
+      db.exec('ALTER TABLE users ADD COLUMN is_verified INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!userCols.has('is_active')) {
+      db.exec('ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1;');
+    }
+    if (!userCols.has('updated_at')) {
+      db.exec('ALTER TABLE users ADD COLUMN updated_at INTEGER;');
+    }
+    if (!userCols.has('last_login_at')) {
+      db.exec('ALTER TABLE users ADD COLUMN last_login_at INTEGER;');
+    }
+
+    const sessionCols = getTableColumns(db, 'sessions');
+    if (!sessionCols.has('token_hash')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN token_hash TEXT;');
+    }
+    if (!sessionCols.has('user_agent')) {
+      db.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT DEFAULT '';");
+    }
+    if (!sessionCols.has('ip_address')) {
+      db.exec("ALTER TABLE sessions ADD COLUMN ip_address TEXT DEFAULT '';");
+    }
+    if (!sessionCols.has('revoked_at')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN revoked_at INTEGER;');
+    }
+
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique
+        ON users (lower(email)) WHERE email != '';
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_token_hash
+        ON sessions (token_hash);
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_user_id
+        ON sessions (user_id);
+
+      CREATE TABLE IF NOT EXISTS verification_tokens (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        target TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        code_hash TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_verification_lookup
+        ON verification_tokens (target, purpose, expires_at);
+
+      CREATE TABLE IF NOT EXISTS passenger_profiles (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        age INTEGER NOT NULL,
+        gender TEXT NOT NULL,
+        berth_preference TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_passenger_profiles_user
+        ON passenger_profiles (user_id);
+
+      CREATE TABLE IF NOT EXISTS transactions (
+        id TEXT PRIMARY KEY,
+        pnr TEXT NOT NULL,
+        user_id TEXT,
+        gateway TEXT NOT NULL,
+        gateway_order_id TEXT,
+        gateway_payment_id TEXT,
+        amount REAL NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'INR',
+        status TEXT NOT NULL,
+        raw_status TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_transactions_pnr
+        ON transactions (pnr);
+
+      CREATE INDEX IF NOT EXISTS idx_transactions_order_id
+        ON transactions (gateway_order_id);
+
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY,
+        actor_id TEXT,
+        actor_label TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT,
+        metadata_json TEXT,
+        ip_address TEXT,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_created
+        ON audit_logs (created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS app_config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_bookings_user
+        ON bookings (user_id, created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_bookings_session
+        ON bookings (session_id, created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_bookings_status_date
+        ON bookings (status, journey_date);
+
+      CREATE INDEX IF NOT EXISTS idx_notifications_user
+        ON notifications (user_id, read, created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_notifications_session
+        ON notifications (session_id, read, created_at DESC);
+    `);
+
+    db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
+      2,
+      'auth_rbac_transactions_audit_config',
+      Date.now()
+    );
+  }
+}
 
 export function createDatabase(dbPath: string): DatabaseSync {
   if (dbPath !== ':memory:') {
@@ -326,134 +621,9 @@ export function createDatabase(dbPath: string): DatabaseSync {
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
+  db.exec('PRAGMA busy_timeout = 5000;');
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS stations (
-      code TEXT PRIMARY KEY,
-      name_en TEXT NOT NULL,
-      name_te TEXT NOT NULL,
-      city TEXT NOT NULL,
-      state TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS trains (
-      id TEXT PRIMARY KEY,
-      train_number TEXT NOT NULL UNIQUE,
-      name_en TEXT NOT NULL,
-      name_te TEXT NOT NULL,
-      running_days_json TEXT NOT NULL,
-      stops_json TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS coaches (
-      id TEXT PRIMARY KEY,
-      train_id TEXT NOT NULL,
-      coach_code TEXT NOT NULL,
-      coach_type TEXT NOT NULL,
-      sort_order INTEGER NOT NULL,
-      total_seats INTEGER NOT NULL,
-      FOREIGN KEY (train_id) REFERENCES trains(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS seats (
-      id TEXT PRIMARY KEY,
-      coach_id TEXT NOT NULL,
-      train_id TEXT NOT NULL,
-      journey_date TEXT NOT NULL,
-      seat_number INTEGER NOT NULL,
-      berth_type TEXT NOT NULL,
-      bay_number INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      held_by_session TEXT,
-      hold_expires_at INTEGER,
-      booked_pnr TEXT,
-      UNIQUE(coach_id, journey_date, seat_number)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_seats_lookup
-      ON seats (train_id, coach_id, journey_date);
-
-    CREATE TABLE IF NOT EXISTS pricing_config (
-      coach_type TEXT PRIMARY KEY,
-      label_en TEXT NOT NULL,
-      label_te TEXT NOT NULL,
-      base_fare REAL NOT NULL,
-      per_km_rate REAL NOT NULL,
-      reservation_fee REAL NOT NULL,
-      gst_percent REAL NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      mobile TEXT NOT NULL UNIQUE,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL,
-      age INTEGER,
-      gender TEXT,
-      created_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS otp_challenges (
-      mobile TEXT PRIMARY KEY,
-      otp_code TEXT NOT NULL,
-      expires_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS sessions (
-      token TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      mobile TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS bookings (
-      pnr TEXT PRIMARY KEY,
-      user_id TEXT,
-      session_id TEXT NOT NULL,
-      train_id TEXT NOT NULL,
-      train_number TEXT NOT NULL,
-      train_name_en TEXT NOT NULL,
-      train_name_te TEXT NOT NULL,
-      from_code TEXT NOT NULL,
-      from_name_en TEXT NOT NULL,
-      to_code TEXT NOT NULL,
-      to_name_en TEXT NOT NULL,
-      departure_time TEXT NOT NULL,
-      arrival_time TEXT NOT NULL,
-      journey_date TEXT NOT NULL,
-      coach_id TEXT NOT NULL,
-      coach_code TEXT NOT NULL,
-      coach_type TEXT NOT NULL,
-      seat_numbers_json TEXT NOT NULL,
-      passengers_json TEXT NOT NULL,
-      status TEXT NOT NULL,
-      payment_method TEXT,
-      payment_status TEXT NOT NULL,
-      fare_per_seat REAL NOT NULL,
-      total_fare REAL NOT NULL,
-      hold_expires_at INTEGER,
-      refund_status TEXT NOT NULL,
-      refund_amount REAL NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS notifications (
-      id TEXT PRIMARY KEY,
-      user_id TEXT,
-      session_id TEXT,
-      type TEXT NOT NULL,
-      title_en TEXT NOT NULL,
-      title_te TEXT NOT NULL,
-      message_en TEXT NOT NULL,
-      message_te TEXT NOT NULL,
-      is_simulated INTEGER NOT NULL DEFAULT 1,
-      read INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL
-    );
-  `);
-
+  runMigrations(db);
   seedStaticData(db);
   return db;
 }
@@ -483,145 +653,68 @@ function seedStaticData(db: DatabaseSync): void {
     );
   }
 
-  const insertTrain = db.prepare(`
-    INSERT OR IGNORE INTO trains (id, train_number, name_en, name_te, running_days_json, stops_json)
-    VALUES (?, ?, ?, ?, ?, ?)
+  const now = Date.now();
+  const insertConfig = db.prepare(`
+    INSERT OR IGNORE INTO app_config (key, value, updated_at)
+    VALUES (?, ?, ?)
   `);
-  const insertCoach = db.prepare(`
-    INSERT OR IGNORE INTO coaches (id, train_id, coach_code, coach_type, sort_order, total_seats)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
+  insertConfig.run('app_name', 'TRAINSYNK', now);
+  insertConfig.run('support_email', 'support@trainsynk.in', now);
+  insertConfig.run('hold_duration_minutes', '15', now);
+  insertConfig.run('max_seats_per_booking', '6', now);
+  insertConfig.run('maintenance_mode', 'false', now);
 
-  for (const train of DEMO_TRAINS) {
-    insertTrain.run(
-      train.id,
-      train.trainNumber,
-      train.nameEn,
-      train.nameTe,
-      JSON.stringify(train.runningDays),
-      JSON.stringify(train.stops)
-    );
-    train.coaches.forEach((coach, idx) => {
-      const seatCount = generateCoachSeatDefinitions(coach.type).length;
-      const coachId = `${train.id}-${coach.code}`;
-      insertCoach.run(coachId, train.id, coach.code, coach.type, idx + 1, seatCount);
-    });
+  const existingTrainsCount = db.prepare('SELECT COUNT(*) as cnt FROM trains').get() as { cnt: number };
+  if (existingTrainsCount.cnt === 0) {
+    const insertTrain = db.prepare(`
+      INSERT OR IGNORE INTO trains (id, train_number, name_en, name_te, running_days_json, stops_json)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const insertCoach = db.prepare(`
+      INSERT OR IGNORE INTO coaches (id, train_id, coach_code, coach_type, sort_order, total_seats)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const train of DEMO_TRAINS) {
+      insertTrain.run(
+        train.id,
+        train.trainNumber,
+        train.nameEn,
+        train.nameTe,
+        JSON.stringify(train.runningDays),
+        JSON.stringify(train.stops)
+      );
+      train.coaches.forEach((coach, idx) => {
+        const seatCount = generateCoachSeatDefinitions(coach.type).length;
+        const coachId = `${train.id}-${coach.code}`;
+        insertCoach.run(coachId, train.id, coach.code, coach.type, idx + 1, seatCount);
+      });
+    }
   }
 
-  // Seed initial demo notifications & historical/upcoming sample bookings once
   const existingNotifCount = db.prepare('SELECT COUNT(*) as cnt FROM notifications').get() as { cnt: number };
   if (existingNotifCount.cnt === 0) {
-    const now = Date.now();
     const insertNotif = db.prepare(`
       INSERT INTO notifications (id, user_id, session_id, type, title_en, title_te, message_en, message_te, is_simulated, read, created_at)
-      VALUES (?, NULL, 'DEMO-GLOBAL', ?, ?, ?, ?, ?, 1, 0, ?)
+      VALUES (?, NULL, 'DEMO-GLOBAL', ?, ?, ?, ?, ?, 0, 0, ?)
     `);
     insertNotif.run(
       'NTF-SEED-1',
       'TRAIN_DELAY',
-      'Simulated Schedule Update: 12728 Godavari Express',
-      'నమూనా సమయ మార్పు: 12728 గోదావరి ఎక్స్‌ప్రెస్',
-      'Demo Alert: Train 12728 is running on time from Secunderabad Platform 4.',
-      'డెమో హెచ్చరిక: రైలు 12728 సికింద్రాబాద్ ప్లాట్‌ఫారమ్ 4 నుండి సమయానికి నడుస్తోంది.',
+      'Schedule Notice: 12728 Godavari Superfast Express',
+      'సమయ సమాచారం: 12728 గోదావరి సూపర్‌ఫాస్ట్ ఎక్స్‌ప్రెస్',
+      'Train 12728 is scheduled on time from Secunderabad Jn Platform 4.',
+      'రైలు 12728 సికింద్రాబాద్ జం. ప్లాట్‌ఫారమ్ 4 నుండి సమయానికి బయలుదేరుతుంది.',
       now - 3600_000
     );
     insertNotif.run(
       'NTF-SEED-2',
       'PLATFORM_CHANGE',
-      'Simulated Platform Notice: 12734 Narayanadri Express',
-      'నమూనా ప్లాట్‌ఫారమ్ సమాచారం: 12734 నారాయణాద్రి ఎక్స్‌ప్రెస్',
-      'Demo Alert: Coach B1 & A1 positioned near Foot Overbridge East at Secunderabad (Platform 5).',
-      'డెమో హెచ్చరిక: కోచ్ B1 & A1 సికింద్రాబాద్ ప్లాట్‌ఫారమ్ 5 తూర్పు వంతెన వద్ద ఉంటాయి.',
+      'Coach Position: 12734 Narayanadri Superfast',
+      'కోచ్ స్థానం: 12734 నారాయణాద్రి సూపర్‌ఫాస్ట్',
+      'Coaches B1 & A1 positioned near Foot Overbridge East at Secunderabad Platform 5.',
+      'కోచ్‌లు B1 & A1 సికింద్రాబాద్ ప్లాట్‌ఫారమ్ 5 తూర్పు వంతెన వద్ద ఉంటాయి.',
       now - 1800_000
-    );
-    insertNotif.run(
-      'NTF-SEED-3',
-      'JOURNEY_REMINDER',
-      'Demo Journey Reminder: AP & Telangana MVP',
-      'డెమో ప్రయాణ గుర్తు: AP & తెలంగాణ MVP',
-      'Remember to test the 15-minute seat hold, simulated payment outcomes, and E-Ticket PDF export.',
-      '15-నిమిషాల సీట్ హోల్డ్, నమూనా చెల్లింపు మరియు PDF టికెట్ డౌన్‌లోడ్‌ను పరీక్షించండి.',
-      now - 900_000
-    );
-  }
-
-  const existingBookingsCount = db.prepare('SELECT COUNT(*) as cnt FROM bookings').get() as { cnt: number };
-  if (existingBookingsCount.cnt === 0) {
-    const now = Date.now();
-    const pastDate = new Date(now - 5 * 86400_000).toISOString().slice(0, 10);
-    const futureDate = new Date(now + 4 * 86400_000).toISOString().slice(0, 10);
-
-    const insertBooking = db.prepare(`
-      INSERT INTO bookings (
-        pnr, user_id, session_id, train_id, train_number, train_name_en, train_name_te,
-        from_code, from_name_en, to_code, to_name_en, departure_time, arrival_time, journey_date,
-        coach_id, coach_code, coach_type, seat_numbers_json, passengers_json, status,
-        payment_method, payment_status, fare_per_seat, total_fare, hold_expires_at,
-        refund_status, refund_amount, created_at, updated_at
-      ) VALUES (?, NULL, 'DEMO-GLOBAL', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
-    `);
-
-    insertBooking.run(
-      'DM84920145',
-      'TR-12728',
-      '12728',
-      'Godavari Superfast Express',
-      'గోదావరి సూపర్‌ఫాస్ట్ ఎక్స్‌ప్రెస్',
-      'SC',
-      'Secunderabad Jn',
-      'VSKP',
-      'Visakhapatnam Jn',
-      '17:25',
-      '04:55',
-      pastDate,
-      'TR-12728-B1',
-      'B1',
-      '3A',
-      JSON.stringify([12, 13]),
-      JSON.stringify([
-        { seatNumber: 12, berthType: 'LB', fullName: 'Ramesh Varma', age: '34', gender: 'Male' },
-        { seatNumber: 13, berthType: 'MB', fullName: 'Lakshmi Varma', age: '30', gender: 'Female' },
-      ]),
-      'CONFIRMED',
-      'UPI',
-      'SUCCESS',
-      1265,
-      2530,
-      'NOT_APPLICABLE',
-      0,
-      now - 7 * 86400_000,
-      now - 7 * 86400_000
-    );
-
-    insertBooking.run(
-      'DM77310924',
-      'TR-12734',
-      '12734',
-      'Narayanadri Superfast',
-      'నారాయణాద్రి సూపర్‌ఫాస్ట్',
-      'SC',
-      'Secunderabad Jn',
-      'TPTY',
-      'Tirupati',
-      '18:05',
-      '05:30',
-      futureDate,
-      'TR-12734-A1',
-      'A1',
-      '2A',
-      JSON.stringify([7]),
-      JSON.stringify([
-        { seatNumber: 7, berthType: 'LB', fullName: 'Srinivas Rao', age: '42', gender: 'Male' },
-      ]),
-      'CANCELLED',
-      'PHONEPE',
-      'SUCCESS',
-      1880,
-      1880,
-      'REFUNDED',
-      1680,
-      now - 2 * 86400_000,
-      now - 1 * 86400_000
     );
   }
 }
@@ -642,7 +735,6 @@ export function ensureSeatsForCoachDate(
   }
 
   const defs = generateCoachSeatDefinitions(coachType);
-  // Deterministic occupancy hash based on coachId + seatNumber + date so every reload sees identical consistent seat statuses
   const seedHash = (coachId + journeyDate)
     .split('')
     .reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) % 997, 7);
@@ -683,9 +775,17 @@ export function ensureSeatsForCoachDate(
   }
 }
 
+export function getDbPathLabel(): string {
+  return activeDbPathLabel;
+}
+
 export function getDb(): DatabaseSync {
   if (!dbInstance) {
-    const dbPath = path.resolve(process.cwd(), 'data', 'rail_demo.db');
+    const configured = process.env.DATABASE_PATH?.trim();
+    const dbPath = configured
+      ? path.resolve(configured)
+      : path.resolve(process.cwd(), 'data', 'rail_demo.db');
+    activeDbPathLabel = path.relative(process.cwd(), dbPath) || dbPath;
     dbInstance = createDatabase(dbPath);
   }
   return dbInstance;
